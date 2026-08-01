@@ -1,0 +1,145 @@
+// Marcaworld - Prisma + PostgreSQL veritabanı şeması
+// Çalıştırmak için: npx prisma migrate dev --name init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------- YÖNETİM PANELİ KULLANICILARI ----------
+model AdminUser {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         String   @default("admin") // admin | editor
+  createdAt    DateTime @default(now())
+}
+
+// ---------- ÜLKELER (şirket kuruluşu yapılan ülkeler) ----------
+model Country {
+  id          String    @id @default(cuid())
+  slug        String    @unique // "hu", "uk", "us" ...
+  flag        String    // emoji
+  name        String    // "Macaristan"
+  entity      String    // "Kft. şirket kuruluşu"
+  currencySym String    // "€", "£", "$"
+  basePrice   Float     // temel paket bedeli
+  govFee      Float     @default(0) // resmi harç
+  days        Int       // ortalama kuruluş süresi (gün)
+  remote      Boolean   @default(true) // uzaktan kurulabiliyor mu
+  taxNote     String?   // vergi notu, örn "%9 kurumlar vergisi"
+  published   Boolean   @default(true)
+  order       Int       @default(0)
+  services    Service[]
+  configs     CompanyConfiguration[]
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+// ---------- EK HİZMETLER (her ülkeye bağlı) ----------
+model Service {
+  id          String   @id @default(cuid())
+  countryId   String
+  country     Country  @relation(fields: [countryId], references: [id], onDelete: Cascade)
+  slug        String   // "address", "bank", "vat" ...
+  groupName   String   // "Adres ve operasyon", "Banka ve ödeme" ...
+  name        String
+  description String?
+  price       Float
+  yearly      Boolean  @default(false) // yıllık tekrarlanan hizmet
+  recurring   Boolean  @default(false)
+  term        String?  // "6 ay" gibi
+  renewPrice  Float?
+  required    Boolean  @default(false)
+  days        Int?     // ek süre gerektiriyorsa
+  published   Boolean  @default(true)
+  order       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+// ---------- FİYATLANDIRMA YAPILANDIRICISI ÜZERİNDEN GELEN TEKLİFLER ----------
+model CompanyConfiguration {
+  id               String   @id @default(cuid())
+  countryId        String?
+  country          Country? @relation(fields: [countryId], references: [id])
+  selectedServices Json     // seçilen hizmetlerin id/isim/fiyat listesi
+  totalPrice       Float
+  secondYearPrice  Float    @default(0)
+  discountApplied  Float    @default(0)
+  customerName     String
+  customerEmail    String
+  customerPhone    String
+  activityNote     String?
+  timeline         String?  // "Hemen", "1 ay içinde" ...
+  status           String   @default("yeni") // yeni | iletisimde | tamamlandi | iptal
+  pdfPath          String?  // oluşturulan teklif PDF'inin sunucudaki yolu
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+}
+
+// ---------- İLETİŞİM FORMU / GENEL LEAD'LER ----------
+model Lead {
+  id        String   @id @default(cuid())
+  name      String
+  email     String?
+  phone     String?
+  subject   String?
+  message   String?
+  source    String   @default("iletisim") // iletisim | wipo | rehber | diger
+  status    String   @default("yeni") // yeni | iletisimde | kapandi
+  createdAt DateTime @default(now())
+}
+
+// ---------- MARKA TESCİL / WIPO BAŞVURULARI ----------
+model TrademarkApplication {
+  id              String   @id @default(cuid())
+  brandName       String
+  applicantName   String
+  email           String
+  phone           String
+  country         String   @default("Türkiye") // TR, WIPO/Uluslararası vb.
+  niceClasses     String?  // sınıf/mal-hizmet açıklaması
+  applicationType String   @default("ulusal") // ulusal | wipo
+  status          String   @default("basvuru-alindi")
+  note            String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+// ---------- REHBER / BLOG YAZILARI ----------
+model Article {
+  id          String    @id @default(cuid())
+  slug        String    @unique
+  title       String
+  excerpt     String?
+  contentHtml String    @db.Text
+  category    String?
+  published   Boolean   @default(false)
+  publishedAt DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+}
+
+// ---------- SIK SORULAN SORULAR (sayfa bazlı) ----------
+model FaqItem {
+  id       String @id @default(cuid())
+  page     String // "anasayfa", "marka-tescili", "fiyatlandirma" ...
+  question String
+  answer   String @db.Text
+  order    Int    @default(0)
+}
+
+// ---------- ESNEK SAYFA İÇERİĞİ (hero metni, istatistik, referans gibi
+// sık değişen ama tablo açmayı gerektirmeyen bloklar için) ----------
+model PageContent {
+  id        String   @id @default(cuid())
+  page      String   @unique // "anasayfa", "marka-tescili" ...
+  data      Json     // { hero: {...}, stats: [...], reviews: [...] }
+  updatedAt DateTime @updatedAt
+}
