@@ -20,7 +20,9 @@ export default function AdminLoginPage() {
       });
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || 'Giriş başarısız.');
-      router.push('/admin');
+      // Giriş öncesi açılmak istenen sayfaya dön (yalnızca site içi yollar)
+      const next = new URLSearchParams(window.location.search).get('next');
+      router.push(next && next.startsWith('/') && !next.startsWith('//') ? next : '/admin');
       router.refresh();
     } catch (err) {
       setError(err.message);

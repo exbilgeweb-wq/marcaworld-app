@@ -1,4 +1,4 @@
-import LeadForm from '../../components/LeadForm';
+import LeadForm from '../../../components/LeadForm';
 
 export default function IletisimPage() {
   return (

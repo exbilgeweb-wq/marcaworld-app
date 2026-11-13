@@ -14,8 +14,11 @@
   "dependencies": {
     "@prisma/client": "^5.18.0",
     "bcryptjs": "^2.4.3",
+    "dejavu-fonts-ttf": "^2.37.3",
     "jsonwebtoken": "^9.0.2",
     "next": "14.2.35",
+    "nodemailer": "^6.10.1",
+    "pdfjs-dist": "^4.10.38",
     "pdfkit": "^0.15.0",
     "react": "18.3.1",
     "react-dom": "18.3.1"

@@ -1,5 +1,5 @@
-import { prisma } from '../../lib/db';
-import LeadForm from '../../components/LeadForm';
+import { prisma } from '../../../lib/db';
+import LeadForm from '../../../components/LeadForm';
 
 export const dynamic = 'force-dynamic';
 

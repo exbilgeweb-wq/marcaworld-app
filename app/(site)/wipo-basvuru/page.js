@@ -1,4 +1,4 @@
-import TrademarkForm from '../../components/TrademarkForm';
+import TrademarkForm from '../../../components/TrademarkForm';
 
 export default function WipoBasvuruPage() {
   return (

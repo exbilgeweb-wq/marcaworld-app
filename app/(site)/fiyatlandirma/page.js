@@ -1,6 +1,6 @@
 import { Suspense } from 'react';
-import { prisma } from '../../lib/db';
-import PricingConfigurator from '../../components/PricingConfigurator';
+import { prisma } from '../../../lib/db';
+import PricingConfigurator from '../../../components/PricingConfigurator';
 
 export const dynamic = 'force-dynamic';
 

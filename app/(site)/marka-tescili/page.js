@@ -1,5 +1,5 @@
-import { prisma } from '../../lib/db';
-import TrademarkForm from '../../components/TrademarkForm';
+import { prisma } from '../../../lib/db';
+import TrademarkForm from '../../../components/TrademarkForm';
 
 export const dynamic = 'force-dynamic';
 

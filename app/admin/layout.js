@@ -8,6 +8,7 @@ const NAV = [
   { href: '/admin/trademark', label: 'Marka / WIPO başvuruları' },
   { href: '/admin/quotes', label: 'Fiyat teklifleri' },
   { href: '/admin/articles', label: 'Rehber yazıları' },
+  { href: '/izleme', label: 'Marka izleme platformu →' },
 ];
 
 export default function AdminLayout({ children }) {

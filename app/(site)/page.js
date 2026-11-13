@@ -1,5 +1,5 @@
-import { prisma } from '../lib/db';
-import FaqAccordion from '../components/FaqAccordion';
+import { prisma } from '../../lib/db';
+import FaqAccordion from '../../components/FaqAccordion';
 
 export const dynamic = 'force-dynamic';
 
