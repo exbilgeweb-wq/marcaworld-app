@@ -9,6 +9,9 @@ generator client {
 datasource db {
   provider   = "postgresql"
   url        = env("DATABASE_URL")
+  // Havuzlu bağlantı (pgbouncer) kullanılıyorsa migrate için doğrudan bağlantı.
+  // Havuz yoksa DATABASE_URL ile aynı değeri verin.
+  directUrl  = env("DIRECT_URL")
   extensions = [pg_trgm]
 }
 
@@ -19,6 +22,11 @@ model AdminUser {
   passwordHash String
   name         String
   role         String   @default("admin") // admin | editor
+  // ---- Marka izleme platformu ----
+  izlemeRole   String   @default("uzman") // yonetici | uzman | asistan | izleyici  (role=admin her zaman yönetici sayılır)
+  active       Boolean  @default(true)
+  calendarKey  String?  @unique           // kişisel iCal akışı anahtarı
+  notifyPrefs  Json?                       // { gunlukOzet: true, atamaBildirimi: true }
   createdAt    DateTime @default(now())
 }
 
@@ -148,101 +156,162 @@ model PageContent {
 
 // =====================================================================
 //  MARKA İZLEME PLATFORMU  (/izleme)
-//  Ayrıntılı açıklama: docs/marka-izleme/MIMARI.md
-//  Tarih alanları: gün bazlı tarihler UTC 00:00 olarak saklanır
-//  (ör. bülten yayın tarihi 2026-11-03 → 2026-11-03T00:00:00Z).
+//  Ayrıntılı açıklama ve kurallar: docs/marka-izleme/MIMARI.md
+//  Gün bazlı tarihler UTC 00:00 olarak saklanır (ör. yayın 2026-11-03 →
+//  2026-11-03T00:00:00Z). Zaman damgaları (createdAt vb.) gerçek andır.
+//  Kayıtlar silinmez, arşivlenir (archivedAt). Activity / Notification /
+//  ClientDecision yalnız eklenir, güncellenmez ve silinmez (hukuki iz).
 // =====================================================================
 
 // ---------- MÜVEKKİLLER ----------
 model Client {
-  id            String        @id @default(cuid())
-  name          String                          // firma / kişi adı
-  type          String        @default("kurumsal") // kurumsal | bireysel
-  contactName   String?
-  email         String?
-  phone         String?
-  taxNo         String?
-  city          String?
-  notes         String?       @db.Text
-  portalToken   String?       @unique           // müşteri portalı bağlantısı (rastgele, tahmin edilemez)
-  portalEnabled Boolean       @default(true)
-  notifyEmail   Boolean       @default(true)    // eşleşmeler müşteriye e-postayla bildirilebilir mi
-  source        String        @default("manuel") // manuel | site-formu | ice-aktarim
-  leadId        String?
-  active        Boolean       @default(true)
-  kvkkConsentAt DateTime?                       // KVKK aydınlatma/açık rıza onayı
-  marks         WatchedMark[]
-  oppositions   Opposition[]
-  deadlines     Deadline[]
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
+  id                     String           @id @default(cuid())
+  name                   String
+  type                   String           @default("kurumsal") // kurumsal | bireysel
+  contactName            String?
+  email                  String?
+  phone                  String?
+  taxNo                  String?
+  city                   String?
+  address                String?
+  notes                  String?          @db.Text
+  responsibleId          String?                              // sorumlu uzman (AdminUser.id) — yeni eşleşmeler ona atanır
+  portalTokenHash        String?          @unique             // sha256(token); düz token yalnız oluşturulurken gösterilir
+  portalTokenCreatedAt   DateTime?
+  portalTokenExpiresAt   DateTime?
+  portalEnabled          Boolean          @default(true)
+  notifyEmail            Boolean          @default(true)      // eşleşmeler müşteriye e-postayla bildirilebilir mi
+  notifyCadence          String           @default("bulten")  // bulten | yalniz-yuksek | aylik-ozet
+  zeroMatchMail          Boolean          @default(false)     // "bülten tarandı, risk yok" e-postası
+  poaStatus              String           @default("yok")     // vekaletname: yok | var | suresi-doldu
+  poaExpiresAt           DateTime?
+  source                 String           @default("manuel")  // manuel | site-formu | ice-aktarim
+  isSample               Boolean          @default(false)     // örnek veri (toplu silinebilir)
+  active                 Boolean          @default(true)
+  kvkkNoticeVersion      String?                              // gösterilen aydınlatma metni sürümü
+  kvkkNoticeShownAt      DateTime?
+  commercialMsgConsentAt DateTime?                            // ticari ileti onayı (isteğe bağlı, ayrı)
+  anonymizedAt           DateTime?                            // KVKK silme talebiyle anonimleştirildi
+  archivedAt             DateTime?
+  contacts               ClientContact[]
+  marks                  WatchedMark[]
+  oppositions            Opposition[]
+  deadlines              Deadline[]
+  decisions              ClientDecision[]
+  documents              Document[]
+  createdAt              DateTime         @default(now())
+  updatedAt              DateTime         @updatedAt
 
   @@index([active])
+  @@index([responsibleId])
+}
+
+// Müvekkil tarafındaki kişiler (e-posta alıcıları)
+model ClientContact {
+  id               String   @id @default(cuid())
+  clientId         String
+  client           Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  name             String
+  email            String?
+  phone            String?
+  title            String?
+  receivesMatches  Boolean  @default(true)
+  receivesRenewals Boolean  @default(true)
+  receivesReports  Boolean  @default(true)
+  canDecide        Boolean  @default(true)   // portalda karar verebilir
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([clientId])
 }
 
 // ---------- İZLENEN MARKALAR (portföy) ----------
 model WatchedMark {
-  id               String        @id @default(cuid())
-  clientId         String
-  client           Client        @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  name             String                       // marka ibaresi (540)
-  nameNorm         String        @default("")   // normalize edilmiş ibare (lib/izleme/text.normalize)
-  classes          Int[]                        // Nice sınıfları (511)
-  viennaCodes      String[]                     // şekil unsurları: Viyana kodları (531), ör. "26.04.01"
-  goods            String?       @db.Text       // mal/hizmet listesi (isteğe bağlı)
-  applicationNo    String?                      // TÜRKPATENT başvuru no, ör. 2019/123456
-  registrationNo   String?
-  applicationDate  DateTime?                    // koruma süresi başlangıcı (yenileme hesabı)
-  registrationDate DateTime?
-  markStatus       String        @default("tescilli") // basvuru | yayinda | tescilli | itirazli | reddedildi | sona-erdi
-  logoUrl          String?
-  watchType        String        @default("kelime") // kelime | kelime-sekil | sekil
-  threshold        Int?                         // marka bazlı eşik (boşsa genel ayar)
-  watchRelated     Boolean       @default(true) // ilişkili sınıfları da izle
-  excludeTerms     String[]                     // yanlış alarm üreten ibareler (eşleşme üretmez)
-  ownerAliases     String[]                     // müvekkilin kendi başvurularını elemek için sahip adları
-  active           Boolean       @default(true)
-  pendingApproval  Boolean       @default(false) // site formundan gelen, onay bekleyen talep
-  watchStart       DateTime      @default(now())
-  watchEnd         DateTime?                    // izleme sözleşmesi bitişi
-  notes            String?       @db.Text
-  matches          WatchMatch[]
-  deadlines        Deadline[]
-  createdAt        DateTime      @default(now())
-  updatedAt        DateTime      @updatedAt
+  id                String       @id @default(cuid())
+  clientId          String
+  client            Client       @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  name              String                        // marka ibaresi (540)
+  nameNorm          String       @default("")     // lib/izleme/text.normalize
+  classes           Int[]                         // Nice sınıfları (511)
+  goods             String?      @db.Text         // mal/hizmet listesi
+  goodsByClass      Json?                         // { "3": "...", "35": "..." }
+  viennaCodes       String[]                      // (531) ör. "26.04.01"
+  applicationNo     String?                       // 2019/123456 (kanonik)
+  applicationDate   DateTime?
+  priorityDate      DateTime?                     // rüçhan tarihi (varsa kıdem bunun üzerinden)
+  registrationNo    String?
+  registrationDate  DateTime?
+  markStatus        String       @default("tescilli") // basvuru | yayinda | tescilli | itirazli | reddedildi | sona-erdi
+  logoUrl           String?
+  watchType         String       @default("kelime")   // kelime | kelime-sekil | sekil
+  reputation        String       @default("yok")      // yok | iddia | turkpatent-listesi | mahkeme-karari (tanınmışlık)
+  reputationNote    String?
+  threshold         Int?                          // marka bazlı eşik (boşsa genel ayar)
+  watchRelated      Boolean      @default(true)   // ilişkili sınıfları da izle
+  excludeTerms      String[]                      // bu marka için eşleşme üretmeyecek ibareler (compact)
+  ownerAliases      String[]                      // müvekkilin bültende geçen adları (kendi başvurularını ayırmak için)
+  useEvidenceStatus String       @default("yok")  // kullanım delili: yok | kismi | hazir
+  useEvidenceNote   String?
+  active            Boolean      @default(true)
+  pendingApproval   Boolean      @default(false)  // site formu / portal talebi, onay bekliyor
+  importBatchId     String?                       // CSV içe aktarım grubu (geri alma için)
+  watchStart        DateTime     @default(now())
+  watchEnd          DateTime?                     // izleme sözleşmesi bitişi
+  notes             String?      @db.Text
+  archivedAt        DateTime?
+  matches           WatchMatch[]
+  deadlines         Deadline[]
+  bases             OppositionBasis[]
+  createdAt         DateTime     @default(now())
+  updatedAt         DateTime     @updatedAt
 
   @@index([clientId])
   @@index([active])
+  @@index([applicationNo])
+  @@index([importBatchId])
 }
 
 // ---------- RESMİ MARKA BÜLTENLERİ ----------
 model Bulletin {
-  id                 String         @id @default(cuid())
-  type               String         @default("marka") // marka (ileride: tasarim, patent)
-  number             String         @unique           // "503" ya da "2026/21"
-  publishDate        DateTime                          // yayın tarihi (UTC 00:00)
-  oppositionDeadline DateTime                          // SMK m.18: yayından itibaren 2 ay (+ tatil kaydırması)
-  sourceUrl          String?
-  fileName           String?
-  filePath           String?                           // sunucuda saklanan dosya (kendi sunucunuzda çalışırken)
-  fileHash           String?
-  fileSize           Int?
-  pageCount          Int?
-  pagesDone          Int            @default(0)        // kaldığı yerden devam için
-  recordCount        Int            @default(0)
-  parseWarnings      Int            @default(0)
-  status             String         @default("bekliyor") // bekliyor | indiriliyor | ayristiriliyor | taraniyor | tamamlandi | hata
-  progress           Int            @default(0)        // 0-100
-  error              String?        @db.Text
-  scannedAt          DateTime?
-  matchCount         Int            @default(0)
-  notes              String?
-  marks              BulletinMark[]
-  matches            WatchMatch[]
-  createdAt          DateTime       @default(now())
-  updatedAt          DateTime       @updatedAt
+  id                     String         @id @default(cuid())
+  type                   String         @default("marka") // marka (ileride: tasarim, patent)
+  number                 String                            // "503" ya da "2026/21" (kanonik, baştaki sıfırsız)
+  year                   Int?
+  seq                    Int?                              // ardışıklık / eksik bülten kontrolü için sıra no
+  publishDate            DateTime                          // yayın tarihi (UTC 00:00)
+  publishDateSource      String         @default("elle")   // liste | pdf-kapak | elle | tahmin
+  publishDateConfirmedAt DateTime?                         // personel onayı (onaysız tarihle müşteriye bildirim gitmez)
+  publishDateConfirmedBy String?
+  oppositionDeadline     DateTime                          // SMK m.18: yayın + 2 ay, tatil kaydırmalı
+  deadlineRaw            DateTime?                         // kaydırılmamış yasal son gün
+  deadlineHalfDay        Boolean        @default(false)    // son gün yarım gün (arife / 28 Ekim)
+  sourceUrl              String?
+  fileName               String?
+  filePath               String?                           // yerel kopya (işçi / VPS)
+  fileHash               String?        @unique            // sha256 — aynı dosya iki kez işlenmez
+  fileSize               Int?
+  pageCount              Int?
+  pagesDone              Int            @default(0)        // ilerleme göstergesi
+  resumePage             Int            @default(1)        // devam edilecek sayfa (yarım kaydın başladığı sayfa)
+  importRun              Int            @default(0)        // her yeni dosya içe aktarımında +1
+  recordCount            Int            @default(0)
+  parseWarnings          Int            @default(0)
+  parseStats             Json?                             // { sayfaBasinaKayit, metinsizSayfalar:[], ibaresiz, siniftsiz, ... }
+  status                 String         @default("bekliyor") // bekliyor | indiriliyor | ayristiriliyor | taraniyor | tamamlandi | kontrol-gerekli | hata
+  progress               Int            @default(0)
+  error                  String?        @db.Text
+  scannedAt              DateTime?
+  matchCount             Int            @default(0)
+  staffNotifiedAt        DateTime?
+  notes                  String?
+  marks                  BulletinMark[]
+  matches                WatchMatch[]
+  createdAt              DateTime       @default(now())
+  updatedAt              DateTime       @updatedAt
 
+  @@unique([type, number])
   @@index([publishDate])
+  @@index([status])
 }
 
 // ---------- BÜLTENDE YAYIMLANAN BAŞVURULAR ----------
@@ -250,102 +319,222 @@ model BulletinMark {
   id              String       @id @default(cuid())
   bulletinId      String
   bulletin        Bulletin     @relation(fields: [bulletinId], references: [id], onDelete: Cascade)
-  applicationNo   String                       // (210)
+  applicationNo   String                       // (210) kanonik "YYYY/NNNNNN"
   applicationDate DateTime?                    // (220)
+  priorityDate    DateTime?                    // (300)/(320)
+  priorityNo      String?                      // (310)
+  priorityCountry String?                      // (330)
   markText        String       @default("")    // (540) ibare; salt şekil markada boş
-  markNorm        String       @default("")    // normalize ibare (arama/trigram)
-  markPhon        String       @default("")    // fonetik anahtar
+  markTextSource  String       @default("pdf-metin") // pdf-metin | elle | ocr
+  markNorm        String       @default("")    // normalize ibare
+  markPhon        String       @default("")    // Türkçe okunuş anahtarı
+  markPhonEn      String       @default("")    // yabancı okunuş anahtarı
   markType        String?                      // kelime | sekil | kelime-sekil | diger
+  recordType      String       @default("ulusal") // ulusal | madrid | yeniden-yayin | duzeltme
+  intlRegNo       String?
   classes         Int[]                        // (511)
   goods           String?      @db.Text        // mal ve hizmet metni
+  goodsByClass    Json?                        // { "3": "...", "35": "..." }
   viennaCodes     String[]                     // (531)
   colors          String?                      // (591)
-  priority        String?                      // (300)
-  owner           String?                      // (731)
+  owner           String?                      // (731) ad
   ownerAddress    String?
   attorney        String?                      // (740)
-  pageNo          Int?                         // bültendeki sayfa
-  rawText         String?      @db.Text        // ayrıştırılan ham metin (doğrulama için)
+  pageNo          Int?
+  rawText         String?      @db.Text        // yalnız uyarı üreten kayıtlarda tam, diğerlerinde ilk 2000 karakter
+  contentHash     String       @default("")    // kanonik alanların özeti (yeniden içe aktarımda değişiklik tespiti)
+  importRun       Int          @default(0)
+  editedAt        DateTime?                    // elle düzeltme
+  editedBy        String?
   matches         WatchMatch[]
   createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 
   @@unique([bulletinId, applicationNo])
   @@index([applicationNo])
+  @@index([classes], type: Gin)
   @@index([markNorm(ops: raw("gin_trgm_ops"))], type: Gin, map: "BulletinMark_markNorm_trgm_idx")
   @@index([markPhon(ops: raw("gin_trgm_ops"))], type: Gin, map: "BulletinMark_markPhon_trgm_idx")
+  @@index([markPhonEn(ops: raw("gin_trgm_ops"))], type: Gin, map: "BulletinMark_markPhonEn_trgm_idx")
 }
 
 // ---------- EŞLEŞMELER (inceleme kuyruğu) ----------
 model WatchMatch {
-  id               String       @id @default(cuid())
-  watchedMarkId    String
-  watchedMark      WatchedMark  @relation(fields: [watchedMarkId], references: [id], onDelete: Cascade)
-  bulletinMarkId   String
-  bulletinMark     BulletinMark @relation(fields: [bulletinMarkId], references: [id], onDelete: Cascade)
-  bulletinId       String
-  bulletin         Bulletin     @relation(fields: [bulletinId], references: [id], onDelete: Cascade)
-  score            Int                          // 0-100 toplam risk
-  nameScore        Int                          // 0-100 ibare benzerliği
-  classScore       Int                          // 0-100 sınıf örtüşmesi
-  level            String                       // yuksek | orta | dusuk
-  reasons          Json                         // ["Okunuşu aynı", "Ortak sınıf: 3", ...]
-  sharedClasses    Int[]
-  status           String       @default("yeni") // yeni | inceleniyor | ilgisiz | musteriye-bildirildi | itiraz-edilecek | itiraz-edilmeyecek | itiraz-edildi
-  clientDecision   String?                      // itiraz-istiyor | istemiyor
-  clientDecisionAt DateTime?
-  clientNote       String?      @db.Text
-  assignee         String?                      // personel e-postası
-  note             String?      @db.Text
-  reviewedAt       DateTime?
-  reviewedBy       String?
-  notifiedAt       DateTime?
-  deadline         DateTime                     // itiraz son günü (bültenden)
-  opposition       Opposition?
-  createdAt        DateTime     @default(now())
-  updatedAt        DateTime     @updatedAt
+  id                String           @id @default(cuid())
+  watchedMarkId     String
+  watchedMark       WatchedMark      @relation(fields: [watchedMarkId], references: [id], onDelete: Restrict)
+  bulletinMarkId    String
+  bulletinMark      BulletinMark     @relation(fields: [bulletinMarkId], references: [id], onDelete: Restrict)
+  bulletinId        String
+  bulletin          Bulletin         @relation(fields: [bulletinId], references: [id], onDelete: Restrict)
+  kind              String           @default("kelime") // kelime | sekil
+  origin            String           @default("bulten") // bulten | ilk-tarama (yeni marka/CSV geçmiş taraması) | yeniden-tarama
+  score             Int                                 // 0-100
+  nameScore         Int
+  classScore        Int
+  level             String                              // yuksek | orta | dusuk
+  reasons           Json                                // ["Okunuşu aynı", "Ortak sınıf: 3", ...]
+  sharedClasses     Int[]
+  seniority         String           @default("bilinmiyor") // onceki | sonraki | ayni-gun | bilinmiyor (müvekkil markası hedefe göre)
+  useProofRisk      Boolean          @default(false)    // dayanak marka hedefin tarihinde 5 yıldan eski tescil (SMK 19/2)
+  conflict          Json?                               // { type: 'vekil-biziz'|'sahip-muvekkilimiz', ... } — kilit
+  conflictClearedBy String?
+  conflictClearedAt DateTime?
+  urgent            Boolean          @default(false)    // oluştuğunda son güne ≤21 gün
+  stale             Boolean          @default(false)    // yeniden taramada artık eşik üstü değil
+  lastScannedAt     DateTime?
+  status            String           @default("yeni")   // yeni | inceleniyor | ilgisiz-onay-bekliyor | ilgisiz | otomatik-elendi | musteriye-bildirildi | itiraz-edilecek | itiraz-edilmeyecek | itiraz-edildi
+  autoReason        String?                             // otomatik-elendi: kendi-basvurusu-kesin | haric-ibare
+  dismissReason     String?                             // farkli-mal-hizmet | zayif-benzerlik | genel-kelime | musterinin-kendi-basvurusu | kidem-yok | daha-once-degerlendirildi | diger
+  secondReviewBy    String?                             // yüksek seviye "ilgisiz" için ikinci onay
+  secondReviewAt    DateTime?
+  assigneeId        String?                             // AdminUser.id
+  note              String?          @db.Text           // iç not (müşteri görmez)
+  recommendation    String?                             // itiraz-onerilir | degerlendirilmeli | gerek-yok
+  clientSummary     String?          @db.Text           // müşteriye görünen uzman görüşü
+  quote             Json?                               // { resmiHarc, vekaletUcreti, kdv, toplam, yil }
+  instructionDue    DateTime?                           // müşteriden talimat için iç son gün
+  reviewedAt        DateTime?
+  reviewedBy        String?
+  decidedAt         DateTime?                           // itiraz edilecek/edilmeyecek kararı anı
+  notifiedAt        DateTime?                           // müşteriye ulaştığı doğrulanan an
+  notifyChannel     String?                             // eposta | telefon | whatsapp | eposta-harici | yuz-yuze
+  notifyFailedAt    DateTime?
+  clientViewedAt    DateTime?                           // portalda ilk görüntüleme
+  clientDecision    String?                             // son karar önbelleği: itiraz-istiyor | istemiyor | gorusmek-istiyor
+  clientDecisionAt  DateTime?
+  deadline          DateTime                            // itiraz son günü (bültenden)
+  oppositionId      String?
+  opposition        Opposition?      @relation(fields: [oppositionId], references: [id], onDelete: SetNull)
+  decisions         ClientDecision[]
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
 
   @@unique([watchedMarkId, bulletinMarkId])
-  @@index([status])
+  @@index([status, deadline])
   @@index([bulletinId])
-  @@index([deadline])
+  @@index([bulletinMarkId])
+  @@index([watchedMarkId, status])
+  @@index([assigneeId])
+  @@index([oppositionId])
+}
+
+// Müşteri kararları — yalnız eklenir (kim, ne zaman, hangi kanaldan, o an ne görüyordu)
+model ClientDecision {
+  id          String     @id @default(cuid())
+  matchId     String
+  match       WatchMatch @relation(fields: [matchId], references: [id], onDelete: Restrict)
+  clientId    String
+  client      Client     @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  decision    String                         // itiraz-istiyor | istemiyor | gorusmek-istiyor
+  note        String?    @db.Text
+  source      String                         // portal | telefon | eposta | toplanti | whatsapp
+  decidedBy   String?                        // müşteri tarafında karar veren kişinin adı
+  recordedBy  String?                        // personel e-postası (portal kaynaklıysa boş)
+  ipHash      String?
+  userAgent   String?
+  snapshot    Json                           // { score, level, reasons, deadline, instructionDue, recommendation, quote }
+  createdAt   DateTime   @default(now())
+
+  @@index([matchId])
+  @@index([clientId])
 }
 
 // ---------- İTİRAZ DOSYALARI ----------
 model Opposition {
-  id           String      @id @default(cuid())
-  matchId      String?     @unique
-  match        WatchMatch? @relation(fields: [matchId], references: [id], onDelete: SetNull)
-  clientId     String
-  client       Client      @relation(fields: [clientId], references: [id], onDelete: Cascade)
-  targetAppNo  String                      // itiraz edilen başvuru no
-  targetMark   String
-  targetOwner  String?
-  bulletinNo   String?
-  basisMarks   String?     @db.Text        // dayanak markalar / haklar
-  grounds      String[]                    // SMK gerekçeleri: "6/1", "6/3", "6/4", "6/5", "6/6", "6/7", "6/9", "5/1-b" ...
-  deadline     DateTime                    // itiraz son günü
-  filedAt      DateTime?
-  officeRefNo  String?                     // EPATS evrak numarası
-  officialFee  Float?                      // resmi harç
-  serviceFee   Float?                      // vekil ücreti
-  status       String      @default("hazirlaniyor") // hazirlaniyor | dosyalandi | karsi-gorus | karar-bekleniyor | kabul | kismen-kabul | ret | yidk-itiraz | dava | geri-cekildi
-  decisionDate DateTime?
-  outcomeNote  String?     @db.Text
-  notes        String?     @db.Text
-  deadlines    Deadline[]
-  createdAt    DateTime    @default(now())
-  updatedAt    DateTime    @updatedAt
+  id                  String            @id @default(cuid())
+  direction           String            @default("giden") // giden (biz itiraz ediyoruz) | gelen (müvekkilin başvurusuna itiraz)
+  clientId            String
+  client              Client            @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  targetAppNo         String                              // itiraz edilen başvuru no (gelen'de: müvekkilin başvurusu)
+  targetMark          String
+  targetOwner         String?
+  opponentName        String?                             // gelen: itiraz eden taraf
+  bulletinNo          String?
+  ourMarkId           String?                             // gelen: müvekkilin itiraz edilen markası (WatchedMark.id)
+  grounds             String[]                            // constants.OPPOSITION_GROUNDS değerleri
+  scope               String            @default("tum")   // tum | kismi
+  opposedClasses      Int[]
+  opposedGoods        String?           @db.Text
+  deadline            DateTime                            // itiraz son günü (giden) / karşı görüş son günü (gelen)
+  stage               String            @default("kurum") // kurum | yidk | ilk-derece | istinaf | temyiz
+  status              String            @default("hazirlaniyor") // hazirlaniyor | dosyalandi | karar-bekleniyor | sonuclandi | geri-cekildi
+  outcome             String?                             // kabul | kismen-kabul | ret
+  filedAt             DateTime?
+  officeRefNo         String?                             // EPATS evrak numarası
+  officialFee         Decimal?          @db.Decimal(12, 2)
+  serviceFee          Decimal?          @db.Decimal(12, 2)
+  feePaidAt           DateTime?
+  feeReceiptNo        String?
+  checklist           Json?                               // { vekaletname, dayanakBelgeleri, deliller, dilekce, harcDekontu, evrakNo } → boolean
+  useProofRequestedAt DateTime?
+  useProofDue         DateTime?
+  decisionDate        DateTime?
+  outcomeNote         String?           @db.Text
+  notes               String?           @db.Text
+  assigneeId          String?
+  archivedAt          DateTime?
+  matches             WatchMatch[]
+  bases               OppositionBasis[]
+  events              OppositionEvent[]
+  deadlines           Deadline[]
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
 
+  @@unique([clientId, targetAppNo, direction])
   @@index([status])
+  @@index([clientId])
+}
+
+// İtirazın dayanakları (marka, tescilsiz kullanım, unvan, tanınmış marka ...)
+model OppositionBasis {
+  id            String       @id @default(cuid())
+  oppositionId  String
+  opposition    Opposition   @relation(fields: [oppositionId], references: [id], onDelete: Cascade)
+  watchedMarkId String?
+  watchedMark   WatchedMark? @relation(fields: [watchedMarkId], references: [id], onDelete: SetNull)
+  basisType     String       @default("tescilli-marka") // tescilli-marka | basvuru | tescilsiz-kullanim | ticaret-unvani | taninmis-marka | diger
+  label         String                                  // görünen ad (marka ibaresi / unvan)
+  appNo         String?
+  regNo         String?
+  classes       Int[]
+  useProofRisk  Boolean      @default(false)
+  createdAt     DateTime     @default(now())
+
+  @@index([oppositionId])
+}
+
+// İtiraz dosyasındaki resmi olaylar (tebliğler, kararlar). Süreler YALNIZ buradaki tebliğ tarihlerinden üretilir.
+model OppositionEvent {
+  id           String     @id @default(cuid())
+  oppositionId String
+  opposition   Opposition @relation(fields: [oppositionId], references: [id], onDelete: Cascade)
+  kind         String                    // dosyalandi | itiraz-tebligi | karsi-gorus-sunuldu | kullanim-ispati-talebi | kurum-karari-tebligi | yidk-basvurusu | karsi-taraf-yidk-itirazi-tebligi | yidk-karari-tebligi | dava-acildi | mahkeme-karari-tebligi | bam-karari-tebligi | diger
+  eventDate    DateTime                  // olay tarihi
+  channel      String?                   // e-tebligat | epats | posta | elden
+  deliveredAt  DateTime?                 // muhataba ulaştığı gün
+  servedAt     DateTime?                 // tebliğ edilmiş sayıldığı gün (e-tebligat: ulaşma + 5 gün)
+  periodText   String?                   // yazıda belirtilen süre (ör. "1 ay")
+  documentNo   String?
+  outcome      String?                   // karar olaylarında: kabul | kismen-kabul | ret
+  note         String?    @db.Text
+  createdBy    String?
+  createdAt    DateTime   @default(now())
+
+  @@index([oppositionId])
 }
 
 // ---------- SÜRELER / HATIRLATMALAR ----------
 model Deadline {
   id             String       @id @default(cuid())
-  kind           String                        // itiraz | karsi-gorus | yidk-itiraz | dava | yenileme | yenileme-ek-sure | kullanim-ispati | izleme-bitis | diger
+  kind           String                          // constants.DEADLINE_KINDS
   title          String
-  dueDate        DateTime
-  status         String       @default("acik") // acik | tamamlandi | iptal
+  dueDate        DateTime                        // kaydırılmış son gün
+  rawDueDate     DateTime?                       // kaydırılmamış yasal son gün
+  halfDay        Boolean      @default(false)    // son gün yarım gün
+  shiftReason    String?                         // "29.10.2026 Cumhuriyet Bayramı → 30.10.2026"
+  internal       Boolean      @default(false)    // iç süre (müşteri talimatı, dosya hazırlık) — yasal değil
+  status         String       @default("acik")   // acik | tamamlandi | iptal
   clientId       String?
   client         Client?      @relation(fields: [clientId], references: [id], onDelete: Cascade)
   watchedMarkId  String?
@@ -353,45 +542,81 @@ model Deadline {
   oppositionId   String?
   opposition     Opposition?  @relation(fields: [oppositionId], references: [id], onDelete: Cascade)
   matchId        String?
+  eventId        String?                         // üreten OppositionEvent
+  assigneeId     String?
+  sourceKey      String?      @unique            // otomatik üretilen sürelerin tekil anahtarı (ör. "yenileme:<markId>")
   remindDays     Int[]        @default([30, 14, 7, 3, 1])
-  lastRemindedAt DateTime?
   completedAt    DateTime?
+  completedBy    String?
   note           String?      @db.Text
   createdAt      DateTime     @default(now())
   updatedAt      DateTime     @updatedAt
 
   @@index([dueDate, status])
+  @@index([clientId])
+  @@index([watchedMarkId])
+  @@index([oppositionId])
+  @@index([assigneeId])
 }
 
-// ---------- BİLDİRİM KAYITLARI ----------
+// ---------- BELGELER (vekaletname, dilekçe, delil, tebliğ, karar, dekont) ----------
+model Document {
+  id              String   @id @default(cuid())
+  clientId        String?
+  client          Client?  @relation(fields: [clientId], references: [id], onDelete: SetNull)
+  entity          String                         // client | mark | match | opposition
+  entityId        String
+  kind            String                         // vekaletname | itiraz-dilekcesi | delil | teblig | karar | dekont | diger
+  fileName        String
+  mime            String
+  size            Int
+  content         Bytes?                         // ≤ 4 MB dosyalar veritabanında
+  storageKey      String?                        // ileride nesne deposu
+  visibleToClient Boolean  @default(false)
+  uploadedBy      String?
+  createdAt       DateTime @default(now())
+
+  @@index([entity, entityId])
+  @@index([clientId])
+}
+
+// ---------- BİLDİRİMLER (outbox) ----------
 model Notification {
-  id        String    @id @default(cuid())
-  channel   String                         // email | whatsapp | panel
-  kind      String                         // eslesme-bildirimi | gunluk-ozet | sure-hatirlatma | portal-karar | yeni-bulten | site-talebi
-  recipient String?
-  subject   String?
-  body      String?   @db.Text
-  status    String    @default("bekliyor") // bekliyor | gonderildi | hata | atlandi
-  error     String?   @db.Text
-  clientId  String?
-  matchId   String?
-  readAt    DateTime?                      // panel bildirimleri için
-  sentAt    DateTime?
-  createdAt DateTime  @default(now())
+  id            String    @id @default(cuid())
+  channel       String                         // email | whatsapp | panel | elle
+  kind          String                         // eslesme-bildirimi | gunluk-ozet | sure-hatirlatma | portal-karar | yeni-bulten | bulten-tarandi | site-talebi | eskalasyon | yenileme | test | sistem-uyarisi
+  dedupeKey     String?   @unique              // aynı bildirimin iki kez gitmemesi için
+  recipient     String?
+  subject       String?
+  body          String?   @db.Text
+  status        String    @default("bekliyor") // bekliyor | hazirlandi | gonderildi | hata | atlandi
+  error         String?   @db.Text
+  attempts      Int       @default(0)
+  nextAttemptAt DateTime?
+  clientId      String?
+  matchId       String?
+  staffId       String?                        // panel bildirimi alıcısı
+  readAt        DateTime?
+  sentAt        DateTime?
+  createdBy     String?
+  createdAt     DateTime  @default(now())
 
   @@index([status])
   @@index([createdAt])
+  @@index([clientId])
+  @@index([matchId])
+  @@index([staffId, readAt])
 }
 
-// ---------- İŞLEM GEÇMİŞİ ----------
+// ---------- İŞLEM GEÇMİŞİ (yalnız eklenir) ----------
 model Activity {
   id        String   @id @default(cuid())
   actor     String                         // personel e-postası | "sistem" | "müşteri:<clientId>"
   action    String                         // ör. "eslesme.durum", "bulten.ice-aktar"
-  entity    String                         // client | mark | bulletin | match | opposition | deadline | setting
+  entity    String                         // client | mark | bulletin | bulletin-mark | match | opposition | deadline | setting | document | staff
   entityId  String?
-  summary   String                         // insan okunur açıklama
-  detail    Json?
+  summary   String
+  detail    Json?                          // { changes: { alan: [eski, yeni] }, ... }
   createdAt DateTime @default(now())
 
   @@index([entity, entityId])
@@ -400,21 +625,66 @@ model Activity {
 
 // ---------- ARKA PLAN İŞLERİ ----------
 model Job {
-  id         String    @id @default(cuid())
-  kind       String                        // bulten-kontrol | bulten-indir | bulten-ayristir | bulten-tara | hatirlatma | gunluk-ozet
-  status     String    @default("bekliyor") // bekliyor | calisiyor | tamamlandi | hata
-  bulletinId String?
-  payload    Json?
-  progress   Int       @default(0)
-  message    String?
-  error      String?   @db.Text
-  attempts   Int       @default(0)
-  lockedAt   DateTime?
-  startedAt  DateTime?
-  finishedAt DateTime?
-  createdAt  DateTime  @default(now())
+  id          String    @id @default(cuid())
+  kind        String                         // bulten-kontrol | bulten-indir | bulten-ayristir | bulten-tara | marka-gecmis-tara | hatirlatma | gunluk-ozet | bakim
+  status      String    @default("bekliyor") // bekliyor | calisiyor | tamamlandi | hata
+  dedupeKey   String?                        // `${kind}:${bulletinId ?? '-'}` — açık iş tekilliği (advisory lock ile)
+  bulletinId  String?
+  payload     Json?                          // { cursor, markIds, ... }
+  progress    Int       @default(0)
+  message     String?
+  error       String?   @db.Text
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(5)
+  runAfter    DateTime  @default(now())
+  lockedBy    String?
+  lockToken   String?
+  lockedAt    DateTime?
+  heartbeatAt DateTime?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime  @default(now())
 
-  @@index([status, createdAt])
+  @@index([status, runAfter])
+  @@index([dedupeKey])
+  @@index([bulletinId])
+}
+
+// ---------- KAYITLI GÖRÜNÜMLER (filtre kısayolları) ----------
+model SavedView {
+  id        String   @id @default(cuid())
+  page      String                         // eslesmeler | portfoy | takvim
+  name      String
+  query     String                         // URL sorgu dizesi (?status=yeni&level=yuksek)
+  ownerId   String?                        // boşsa herkese açık
+  shared    Boolean  @default(false)
+  order     Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@index([page])
+}
+
+// ---------- HIZLI ARAŞTIRMA KAYITLARI ----------
+model Search {
+  id          String   @id @default(cuid())
+  query       String
+  classes     Int[]
+  clientId    String?
+  resultCount Int
+  topResults  Json                           // ilk 50 sonucun özeti (rapor yeniden üretimi için)
+  coverage    Json                           // { firstBulletin, lastBulletin, bulletinCount, recordCount, missingNumbers }
+  createdBy   String?
+  createdAt   DateTime @default(now())
+
+  @@index([clientId])
+  @@index([createdAt])
+}
+
+// ---------- ORAN SINIRLAMA (sunucusuz ortamda paylaşılan sayaç) ----------
+model RateLimit {
+  key         String   @id
+  windowStart DateTime
+  count       Int
 }
 
 // ---------- PLATFORM AYARLARI (anahtar → JSON) ----------

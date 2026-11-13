@@ -4,12 +4,21 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "build": "next build",
+    "build": "prisma generate && next build",
     "start": "next start",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:seed": "node prisma/seed.js",
-    "prisma:studio": "prisma studio"
+    "prisma:studio": "prisma studio",
+    "postinstall": "prisma generate",
+    "prisma:deploy": "prisma migrate deploy",
+    "test:izleme": "node --test tests/izleme/",
+    "izleme:gunluk": "node scripts/izleme/gunluk.mjs",
+    "izleme:isci": "node scripts/izleme/worker.mjs",
+    "izleme:ice-aktar": "node scripts/izleme/bulten-ice-aktar.mjs",
+    "izleme:tara": "node scripts/izleme/tara.mjs",
+    "izleme:ornek": "node scripts/izleme/ornek-veri.mjs",
+    "izleme:ayristir": "node scripts/izleme/ayristirma-dene.mjs"
   },
   "dependencies": {
     "@prisma/client": "^5.18.0",
@@ -20,10 +29,14 @@
     "nodemailer": "^6.10.1",
     "pdfjs-dist": "^4.10.38",
     "pdfkit": "^0.15.0",
+    "qrcode": "^1.5.4",
     "react": "18.3.1",
     "react-dom": "18.3.1"
   },
   "devDependencies": {
     "prisma": "^5.18.0"
+  },
+  "engines": {
+    "node": ">=20.12"
   }
 }
