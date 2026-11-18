@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "installedAt": "2026-11-18T05:23:47.613Z",
+  "files": {
+    "/home/user/marcaworld-app/.claude/settings.json": {
+      "plugins": [
+        "ruflo-mods@ruflo",
+        "ruflo-swarm@ruflo",
+        "ruflo-console@ruflo"
+      ],
+      "marketplace": true,
+      "env": true,
+      "claudeInstalled": []
+    }
+  }
+}
